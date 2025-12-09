@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { WORD_POOL } from './data/wordPool'
 import { verifyLyricsContainWord } from './services/lyricsValidation'
@@ -25,7 +25,7 @@ interface Player extends LobbyPlayer {
 
 interface RoundResult {
   word: string
-  outcome: 'success' | 'timeout'
+  outcome: 'success' | 'timeout' | 'skipped'
   winnerId?: string
   song?: string
   artist?: string
@@ -62,6 +62,7 @@ function App() {
   const [history, setHistory] = useState<RoundResult[]>(emptySubmissionHistory)
 
   const activeWord = roundWords[currentRound] ?? ''
+  const gameMaster = roster[0] ?? null
   const canStartGame = lobbyPlayers.length > 0
   const rosterKey = useMemo(
     () => roster.map((player) => player.id).join('-'),
@@ -149,6 +150,48 @@ function App() {
     [advanceRound]
   )
 
+  const handleRoundSkip = useCallback(
+    (word: string) => {
+      setHistory((prev) => [
+        ...prev,
+        {
+          word,
+          outcome: 'skipped'
+        }
+      ])
+
+      advanceRound()
+    },
+    [advanceRound]
+  )
+
+  const handleReshuffleWord = useCallback(() => {
+    setRoundWords((prev) => {
+      if (!prev.length) {
+        return prev
+      }
+
+      const used = new Set([
+        ...history.map((entry) => entry.word),
+        ...prev.slice(0, currentRound)
+      ])
+
+      const currentWord = prev[currentRound]
+      used.delete(currentWord)
+
+      const candidates = WORD_POOL.filter((word) => !used.has(word))
+      if (!candidates.length) {
+        return prev
+      }
+
+      const nextWord =
+        candidates[Math.floor(Math.random() * candidates.length)]
+      const updated = [...prev]
+      updated[currentRound] = nextWord
+      return updated
+    })
+  }, [currentRound, history])
+
   const handleAddPlayer = (name: string) => {
     const trimmed = name.trim()
 
@@ -222,12 +265,15 @@ function App() {
           <GameRound
             key={roundInstanceKey}
             roster={roster}
+            gameMaster={gameMaster}
             word={activeWord}
             roundIndex={currentRound}
             totalRounds={ROUND_TOTAL}
             duration={roundDuration}
             onSuccess={handleRoundWin}
             onTimeout={handleRoundTimeout}
+            onSkip={handleRoundSkip}
+            onReshuffle={handleReshuffleWord}
           />
         </>
       )}
@@ -360,12 +406,15 @@ const Scoreboard = ({ players }: { players: Player[] }) => (
 
 interface GameRoundProps {
   roster: LobbyPlayer[]
+  gameMaster: LobbyPlayer | null
   word: string
   roundIndex: number
   totalRounds: number
   duration: number
   onSuccess: (payload: RoundSuccessPayload) => void
   onTimeout: (word: string) => void
+  onSkip: (word: string) => void
+  onReshuffle: () => void
 }
 
 type SubmissionStatus = 'idle' | 'validating' | 'success' | 'error'
@@ -389,31 +438,51 @@ const createSubmissionState = (players: LobbyPlayer[]) =>
 
 const GameRound = ({
   roster,
+  gameMaster,
   word,
   roundIndex,
   totalRounds,
   duration,
   onSuccess,
-  onTimeout
+  onTimeout,
+  onSkip,
+  onReshuffle
 }: GameRoundProps) => {
   const [timeLeft, setTimeLeft] = useState(() => duration)
   const [roundComplete, setRoundComplete] = useState(false)
+  const [showTimesUp, setShowTimesUp] = useState(false)
+  const [timesUpLeft, setTimesUpLeft] = useState(0)
   const [submissions, setSubmissions] = useState<Record<string, SubmissionState>>(
     () => createSubmissionState(roster)
   )
+  const timeoutRef = useRef<number | null>(null)
+  const timesUpIntervalRef = useRef<number | null>(null)
 
   const percentLeft = (timeLeft / duration) * 100
 
   useEffect(() => {
-    if (roundComplete) {
+    if (roundComplete || timeLeft <= 0) {
       return
     }
 
-    const timerId = window.setTimeout(() => {
+    timeoutRef.current = window.setTimeout(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           setRoundComplete(true)
-          onTimeout(word)
+          setShowTimesUp(true)
+          setTimesUpLeft(5)
+          timesUpIntervalRef.current = window.setInterval(() => {
+            setTimesUpLeft((left) => {
+              if (left <= 1) {
+                if (timesUpIntervalRef.current) {
+                  window.clearInterval(timesUpIntervalRef.current)
+                }
+                onTimeout(word)
+                return 0
+              }
+              return left - 1
+            })
+          }, 1000)
           return 0
         }
 
@@ -421,8 +490,36 @@ const GameRound = ({
       })
     }, 1000)
 
-    return () => window.clearTimeout(timerId)
-  }, [roundComplete, onTimeout, word])
+    return () => {
+      if (timeoutRef.current) {
+        window.clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [roundComplete, timeLeft, onTimeout, word])
+
+  useEffect(
+    () => () => {
+      if (timesUpIntervalRef.current) {
+        window.clearInterval(timesUpIntervalRef.current)
+      }
+    },
+    []
+  )
+
+  const handleSkip = () => {
+    if (roundComplete) {
+      return
+    }
+    setRoundComplete(true)
+    onSkip(word)
+  }
+
+  const handleReshuffle = () => {
+    if (roundComplete) {
+      return
+    }
+    onReshuffle()
+  }
 
   const handleSubmissionChange = (
     playerId: string,
@@ -496,7 +593,12 @@ const GameRound = ({
   return (
     <section className="panel round">
       <div className="round-word">
-        <p>Round {roundIndex + 1}</p>
+        <div className="round-meta">
+          <p>Round {roundIndex + 1}</p>
+          {gameMaster && (
+            <p className="gm-chip">Game Master: {gameMaster.name}</p>
+          )}
+        </div>
         <h2>{word}</h2>
         <div className="timer">
           <div className="timer-track">
@@ -507,6 +609,34 @@ const GameRound = ({
           </div>
           <span>{timeLeft}s remaining</span>
         </div>
+
+        {showTimesUp && (
+          <div className="times-up">
+            <strong>Time’s up</strong>
+            <span>Next round begins in {Math.max(timesUpLeft, 0)} seconds…</span>
+          </div>
+        )}
+
+        {gameMaster && (
+          <div className="gm-controls">
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={roundComplete}
+              onClick={handleReshuffle}
+            >
+              Reshuffle word
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={roundComplete}
+              onClick={handleSkip}
+            >
+              Skip round
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="player-grid">
@@ -621,6 +751,8 @@ const Leaderboard = ({
                 </strong>{' '}
                 with “{entry.song}” — {entry.artist}
               </span>
+            ) : entry.outcome === 'skipped' ? (
+              <span>Skipped by Game Master.</span>
             ) : (
               <span>No match — timer expired.</span>
             )}

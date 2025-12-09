@@ -192,6 +192,21 @@
   margin-bottom: 1.5rem;
 }
 
+.round-meta {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.gm-chip {
+  margin: 0;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  background: #eef1fb;
+  color: #0f172a;
+  font-weight: 600;
+}
+
 .round-word h2 {
   font-size: clamp(2rem, 6vw, 3rem);
   margin: 0;
@@ -218,6 +233,25 @@
   height: 100%;
   background: linear-gradient(90deg, #ff7ab3, #6d7bff);
   border-radius: inherit;
+}
+
+.times-up {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  background: #fff2f2;
+  color: #b42318;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border: 1px solid #f4c7c3;
+}
+
+.gm-controls {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
 }
 
 .player-grid {
