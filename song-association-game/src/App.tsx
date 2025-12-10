@@ -12,6 +12,16 @@ const createId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2, 9)
 
+const createRoomId = () => {
+  // Generate a short, shareable room ID (e.g., "ABC123")
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // Exclude confusing chars
+  let roomId = ''
+  for (let i = 0; i < 6; i++) {
+    roomId += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  return roomId
+}
+
 type Phase = 'lobby' | 'playing' | 'leaderboard'
 
 interface LobbyPlayer {
@@ -53,6 +63,8 @@ const emptySubmissionHistory: RoundResult[] = []
 
 function App() {
   const [phase, setPhase] = useState<Phase>('lobby')
+  const [roomId, setRoomId] = useState<string>('')
+  const [joinRoomId, setJoinRoomId] = useState<string>('')
   const [lobbyPlayers, setLobbyPlayers] = useState<LobbyPlayer[]>([])
   const [roster, setRoster] = useState<LobbyPlayer[]>([])
   const [players, setPlayers] = useState<Player[]>([])
@@ -69,8 +81,8 @@ function App() {
     [roster]
   )
   const roundInstanceKey = useMemo(
-    () => `${activeWord}-${roundDuration}-${rosterKey}`,
-    [activeWord, roundDuration, rosterKey]
+    () => `${currentRound}-${roundDuration}-${rosterKey}`,
+    [currentRound, roundDuration, rosterKey]
   )
 
   const startGameWithRoster = useCallback((selectedRoster: LobbyPlayer[]) => {
@@ -192,6 +204,41 @@ function App() {
     })
   }, [currentRound, history])
 
+  const handleCreateRoom = useCallback(() => {
+    const newRoomId = createRoomId()
+    setRoomId(newRoomId)
+    // Update URL with room ID
+    const url = new URL(window.location.href)
+    url.searchParams.set('room', newRoomId)
+    window.history.pushState({}, '', url.toString())
+  }, [])
+
+  const handleJoinRoom = useCallback(() => {
+    const trimmed = joinRoomId.trim().toUpperCase()
+    if (trimmed.length === 6) {
+      setRoomId(trimmed)
+      const url = new URL(window.location.href)
+      url.searchParams.set('room', trimmed)
+      window.history.pushState({}, '', url.toString())
+      setJoinRoomId('')
+    }
+  }, [joinRoomId])
+
+  const handleCopyRoomId = useCallback(() => {
+    if (roomId) {
+      navigator.clipboard.writeText(roomId)
+    }
+  }, [roomId])
+
+  // Initialize room from URL on mount
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const roomParam = urlParams.get('room')
+    if (roomParam && roomParam.length === 6) {
+      setRoomId(roomParam.toUpperCase())
+    }
+  }, [])
+
   const handleAddPlayer = (name: string) => {
     const trimmed = name.trim()
 
@@ -251,10 +298,16 @@ function App() {
         <Lobby
           players={lobbyPlayers}
           timer={roundDuration}
+          roomId={roomId}
+          joinRoomId={joinRoomId}
           onAddPlayer={handleAddPlayer}
           onRemovePlayer={handleRemovePlayer}
           onTimerChange={setRoundDuration}
           onStart={handleStartGame}
+          onCreateRoom={handleCreateRoom}
+          onJoinRoom={handleJoinRoom}
+          onJoinRoomIdChange={setJoinRoomId}
+          onCopyRoomId={handleCopyRoomId}
           canStart={canStartGame}
         />
       )}
@@ -293,21 +346,33 @@ function App() {
 interface LobbyProps {
   players: LobbyPlayer[]
   timer: number
+  roomId: string
+  joinRoomId: string
   canStart: boolean
   onAddPlayer: (name: string) => void
   onRemovePlayer: (playerId: string) => void
   onTimerChange: (timer: number) => void
   onStart: () => void
+  onCreateRoom: () => void
+  onJoinRoom: () => void
+  onJoinRoomIdChange: (id: string) => void
+  onCopyRoomId: () => void
 }
 
 const Lobby = ({
   players,
   timer,
+  roomId,
+  joinRoomId,
   canStart,
   onAddPlayer,
   onRemovePlayer,
   onTimerChange,
-  onStart
+  onStart,
+  onCreateRoom,
+  onJoinRoom,
+  onJoinRoomIdChange,
+  onCopyRoomId
 }: LobbyProps) => {
   const [nameInput, setNameInput] = useState('')
 
@@ -322,6 +387,60 @@ const Lobby = ({
       <div className="panel-heading">
         <h2>Lobby</h2>
         <p>Invite friends, set a timer, and start the 10-word challenge.</p>
+      </div>
+
+      <div className="room-section">
+        <h3>Room</h3>
+        {roomId ? (
+          <div className="room-display">
+            <div className="room-id-group">
+              <label>Room ID</label>
+              <div className="room-id-display">
+                <code className="room-id">{roomId}</code>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={onCopyRoomId}
+                >
+                  Copy
+                </button>
+              </div>
+              <p className="room-hint">Share this ID with friends to join your game</p>
+            </div>
+          </div>
+        ) : (
+          <div className="room-actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={onCreateRoom}
+            >
+              Create Room
+            </button>
+            <div className="join-room-group">
+              <label htmlFor="join-room">Join Room</label>
+              <div className="stacked-input">
+                <input
+                  id="join-room"
+                  type="text"
+                  placeholder="Enter room ID"
+                  value={joinRoomId}
+                  onChange={(e) => onJoinRoomIdChange(e.target.value.toUpperCase())}
+                  maxLength={6}
+                  style={{ textTransform: 'uppercase' }}
+                />
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={onJoinRoom}
+                  disabled={joinRoomId.length !== 6}
+                >
+                  Join
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <form className="player-form" onSubmit={handleSubmit}>
@@ -452,11 +571,21 @@ const GameRound = ({
   const [roundComplete, setRoundComplete] = useState(false)
   const [showTimesUp, setShowTimesUp] = useState(false)
   const [timesUpLeft, setTimesUpLeft] = useState(0)
+  const [reshuffleUsed, setReshuffleUsed] = useState(false)
   const [submissions, setSubmissions] = useState<Record<string, SubmissionState>>(
     () => createSubmissionState(roster)
   )
   const timeoutRef = useRef<number | null>(null)
   const timesUpIntervalRef = useRef<number | null>(null)
+
+  // Reset timer and reshuffle when round changes
+  useEffect(() => {
+    setTimeLeft(duration)
+    setRoundComplete(false)
+    setShowTimesUp(false)
+    setTimesUpLeft(0)
+    setReshuffleUsed(false)
+  }, [roundIndex, duration])
 
   const percentLeft = (timeLeft / duration) * 100
 
@@ -467,7 +596,8 @@ const GameRound = ({
 
     timeoutRef.current = window.setTimeout(() => {
       setTimeLeft((prev) => {
-        if (prev <= 1) {
+        const newTime = prev - 1
+        if (newTime <= 0) {
           setRoundComplete(true)
           setShowTimesUp(true)
           setTimesUpLeft(5)
@@ -486,7 +616,7 @@ const GameRound = ({
           return 0
         }
 
-        return prev - 1
+        return newTime
       })
     }, 1000)
 
@@ -515,10 +645,12 @@ const GameRound = ({
   }
 
   const handleReshuffle = () => {
-    if (roundComplete) {
+    if (roundComplete || reshuffleUsed) {
       return
     }
+    setReshuffleUsed(true)
     onReshuffle()
+    // Timer continues - don't reset it
   }
 
   const handleSubmissionChange = (
@@ -622,10 +754,10 @@ const GameRound = ({
             <button
               type="button"
               className="ghost-button"
-              disabled={roundComplete}
+              disabled={roundComplete || reshuffleUsed}
               onClick={handleReshuffle}
             >
-              Reshuffle word
+              {reshuffleUsed ? 'Reshuffle used' : 'Reshuffle word'}
             </button>
             <button
               type="button"
