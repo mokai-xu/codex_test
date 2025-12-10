@@ -322,12 +322,44 @@ function App() {
       setLobbyPlayers(playersFromState)
       setRoomPlayers(state.players) // Store full player data with deviceId
       
-      setRoundDuration(state.roundDuration)
-      setPhase(state.phase)
-      setRoundWords(state.roundWords)
-      setCurrentRound(state.currentRound)
-      setHistory(state.history)
-      setGameMasterId(state.gameMasterId)
+      // Only update if values actually changed to prevent unnecessary re-renders
+      setRoundDuration((prev) => prev !== state.roundDuration ? state.roundDuration : prev)
+      setPhase((prev) => prev !== state.phase ? state.phase : prev)
+      
+      // Only update roundWords if they actually changed (prevent random word changes)
+      setRoundWords((prev) => {
+        if (prev.length !== state.roundWords.length) {
+          return state.roundWords
+        }
+        // Check if any word at any index changed
+        for (let i = 0; i < prev.length; i++) {
+          if (prev[i] !== state.roundWords[i]) {
+            // Word changed - only allow if it's the current round (reshuffle) or a new round
+            if (i === state.currentRound || i > state.currentRound) {
+              return state.roundWords
+            }
+            // Otherwise, ignore the change (prevent random word changes)
+            return prev
+          }
+        }
+        return prev
+      })
+      
+      setCurrentRound((prev) => prev !== state.currentRound ? state.currentRound : prev)
+      setHistory((prev) => {
+        // Only update if history actually changed
+        if (prev.length !== state.history.length) {
+          return state.history
+        }
+        // Check if any entry changed
+        for (let i = 0; i < prev.length; i++) {
+          if (JSON.stringify(prev[i]) !== JSON.stringify(state.history[i])) {
+            return state.history
+          }
+        }
+        return prev
+      })
+      setGameMasterId((prev) => prev !== state.gameMasterId ? state.gameMasterId : prev)
 
       if (state.phase === 'playing') {
         // If playersWithScores exists, use it, otherwise create from players
@@ -760,74 +792,84 @@ const GameRound = ({
 
   const percentLeft = (timeLeft / duration) * 100
 
+  // Main countdown timer
   useEffect(() => {
-    // Don't run timer if round is complete or time is already at 0
     if (roundComplete) {
       return
     }
 
-    // If timeLeft is already 0 or less, trigger timeout immediately
     if (timeLeft <= 0) {
-      setRoundComplete(true)
-      setShowTimesUp(true)
-      setTimesUpLeft(5)
-      timesUpIntervalRef.current = window.setInterval(() => {
-        setTimesUpLeft((left) => {
-          if (left <= 1) {
-            if (timesUpIntervalRef.current) {
-              window.clearInterval(timesUpIntervalRef.current)
-            }
-            // Only game master should trigger timeout on server
-            // Other clients will receive the update via room-state event
-            if (gameMaster && myPlayer.id === gameMaster.id) {
-              onTimeout(word)
-            }
-            return 0
-          }
-          return left - 1
-        })
-      }, 1000)
+      // Time is up - trigger the timeout sequence
+      if (!showTimesUp) {
+        setRoundComplete(true)
+        setShowTimesUp(true)
+        setTimesUpLeft(5)
+      }
       return
     }
 
-    // Set up the countdown timer
-    timeoutRef.current = window.setTimeout(() => {
+    // Set up interval to decrement timer every second
+    const intervalId = window.setInterval(() => {
       setTimeLeft((prev) => {
-        const newTime = prev - 1
-        if (newTime <= 0) {
+        if (prev <= 1) {
           setRoundComplete(true)
           setShowTimesUp(true)
           setTimesUpLeft(5)
-          timesUpIntervalRef.current = window.setInterval(() => {
-            setTimesUpLeft((left) => {
-              if (left <= 1) {
-                if (timesUpIntervalRef.current) {
-                  window.clearInterval(timesUpIntervalRef.current)
-                }
-                // Only game master should trigger timeout on server
-                // Other clients will receive the update via room-state event
-                if (gameMaster && myPlayer.id === gameMaster.id) {
-                  onTimeout(word)
-                }
-                return 0
-              }
-              return left - 1
-            })
-          }, 1000)
           return 0
         }
-
-        return newTime
+        return prev - 1
       })
     }, 1000)
 
     return () => {
-      if (timeoutRef.current) {
-        window.clearTimeout(timeoutRef.current)
-        timeoutRef.current = null
+      window.clearInterval(intervalId)
+    }
+  }, [roundComplete, showTimesUp])
+
+  // Handle the "time's up" countdown
+  useEffect(() => {
+    if (!showTimesUp) {
+      // Clear interval if showTimesUp is false
+      if (timesUpIntervalRef.current) {
+        window.clearInterval(timesUpIntervalRef.current)
+        timesUpIntervalRef.current = null
+      }
+      return
+    }
+
+    // Clear any existing interval first
+    if (timesUpIntervalRef.current) {
+      window.clearInterval(timesUpIntervalRef.current)
+      timesUpIntervalRef.current = null
+    }
+
+    // Start the countdown interval - only create once when showTimesUp becomes true
+    timesUpIntervalRef.current = window.setInterval(() => {
+      setTimesUpLeft((left) => {
+        if (left <= 1) {
+          // Time's up countdown finished
+          if (timesUpIntervalRef.current) {
+            window.clearInterval(timesUpIntervalRef.current)
+            timesUpIntervalRef.current = null
+          }
+          // Only game master should trigger timeout on server
+          // Other clients will receive the update via room-state event
+          if (gameMaster && myPlayer.id === gameMaster.id) {
+            onTimeout(word)
+          }
+          return 0
+        }
+        return left - 1
+      })
+    }, 1000)
+
+    return () => {
+      if (timesUpIntervalRef.current) {
+        window.clearInterval(timesUpIntervalRef.current)
+        timesUpIntervalRef.current = null
       }
     }
-  }, [roundComplete, timeLeft, onTimeout, word, gameMaster, myPlayer])
+  }, [showTimesUp, gameMaster, myPlayer, onTimeout, word])
 
   useEffect(
     () => () => {
