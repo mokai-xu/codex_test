@@ -21,9 +21,9 @@ async function tryFetchLyrics(
   )}/${encodeURIComponent(song)}`
 
   try {
-    // Add timeout to prevent hanging
+    // Fast timeout - fail quickly if API is slow
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout
 
     const response = await fetch(endpoint, {
       signal: controller.signal
@@ -39,7 +39,7 @@ async function tryFetchLyrics(
     return { lyrics: payload.lyrics ?? '' }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      // Timeout occurred
+      // Timeout occurred - API too slow
       return null
     }
     return null

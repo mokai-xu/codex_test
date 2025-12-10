@@ -426,14 +426,41 @@ function App() {
   }
 
   const handleReturnToLobby = () => {
+    // Update server state to return to lobby (game master only)
+    if (roomId && isGameMaster) {
+      updateRoomState(roomId, {
+        phase: 'lobby',
+        currentRound: 0,
+        roundWords: [],
+        history: [],
+        playersWithScores: []
+        // Keep players array - don't reset it
+      })
+    }
+    
+    // Update local state immediately
     setPhase('lobby')
     setPlayers([])
     setRoundWords([])
     setCurrentRound(0)
     setHistory(emptySubmissionHistory)
+    // Preserve roster/players - they'll be synced from server state
     if (roster.length) {
       setLobbyPlayers(roster)
+    } else if (roomPlayers.length > 0) {
+      // Use roomPlayers if roster is empty
+      setLobbyPlayers(roomPlayers.map(p => ({ id: p.id, name: p.name })))
     }
+  }
+
+  const handleGoHome = () => {
+    handleReturnToLobby()
+    setRoomId('')
+    setJoinRoomId('')
+    // Clear the room param from URL to exit the game
+    const url = new URL(window.location.href)
+    url.searchParams.delete('room')
+    window.history.pushState({}, '', url.toString())
   }
 
   const sortedLeaders = useMemo(
@@ -446,7 +473,12 @@ function App() {
       <header className="app-header">
         <div>
           <p className="eyebrow">Song Association</p>
-          <h1>Sing on the Spot</h1>
+          <h1 
+            onClick={handleGoHome}
+            className="clickable-title"
+          >
+            Song association game
+          </h1>
         </div>
         <p className="header-meta">
           {phase === 'playing'
@@ -769,6 +801,10 @@ const GameRound = ({
   })
   const timeoutRef = useRef<number | null>(null)
   const timesUpIntervalRef = useRef<number | null>(null)
+  const timesUpCountRef = useRef<number>(0)
+  const timeoutCallbackRef = useRef(onTimeout)
+  const currentWordRef = useRef(word)
+  const isGMRef = useRef(false)
 
   // Reset timer and reshuffle when round changes
   useEffect(() => {
@@ -826,6 +862,13 @@ const GameRound = ({
     }
   }, [roundComplete, showTimesUp])
 
+  // Update refs when values change (without restarting interval)
+  useEffect(() => {
+    timeoutCallbackRef.current = onTimeout
+    currentWordRef.current = word
+    isGMRef.current = !!(gameMaster && myPlayer && myPlayer.id === gameMaster.id)
+  }, [onTimeout, word, gameMaster, myPlayer])
+
   // Handle the "time's up" countdown
   useEffect(() => {
     if (!showTimesUp) {
@@ -834,6 +877,7 @@ const GameRound = ({
         window.clearInterval(timesUpIntervalRef.current)
         timesUpIntervalRef.current = null
       }
+      timesUpCountRef.current = 0
       return
     }
 
@@ -843,24 +887,31 @@ const GameRound = ({
       timesUpIntervalRef.current = null
     }
 
-    // Start the countdown interval - only create once when showTimesUp becomes true
+    // Initialize the countdown ref to 5 (always start at 5 seconds)
+    timesUpCountRef.current = 5
+    setTimesUpLeft(5) // Ensure state matches
+
+    // Start the countdown interval - decrement every second
     timesUpIntervalRef.current = window.setInterval(() => {
-      setTimesUpLeft((left) => {
-        if (left <= 1) {
-          // Time's up countdown finished
-          if (timesUpIntervalRef.current) {
-            window.clearInterval(timesUpIntervalRef.current)
-            timesUpIntervalRef.current = null
-          }
-          // Only game master should trigger timeout on server
-          // Other clients will receive the update via room-state event
-          if (gameMaster && myPlayer.id === gameMaster.id) {
-            onTimeout(word)
-          }
-          return 0
+      // Decrement the ref value
+      timesUpCountRef.current = timesUpCountRef.current - 1
+      
+      // Update state to reflect the countdown
+      setTimesUpLeft(timesUpCountRef.current)
+      
+      if (timesUpCountRef.current <= 0) {
+        // Time's up countdown finished - clear interval
+        if (timesUpIntervalRef.current) {
+          window.clearInterval(timesUpIntervalRef.current)
+          timesUpIntervalRef.current = null
         }
-        return left - 1
-      })
+        
+        // Only game master should trigger timeout on server
+        // Other clients will receive the update via room-state event
+        if (isGMRef.current) {
+          timeoutCallbackRef.current(currentWordRef.current)
+        }
+      }
     }, 1000)
 
     return () => {
@@ -869,7 +920,7 @@ const GameRound = ({
         timesUpIntervalRef.current = null
       }
     }
-  }, [showTimesUp, gameMaster, myPlayer, onTimeout, word])
+  }, [showTimesUp])
 
   useEffect(
     () => () => {
@@ -881,10 +932,19 @@ const GameRound = ({
   )
 
   const handleSkip = () => {
-    if (roundComplete) {
+    if (roundComplete && !showTimesUp) {
       return
     }
+    
+    // Clear the times up interval if it's running
+    if (timesUpIntervalRef.current) {
+      window.clearInterval(timesUpIntervalRef.current)
+      timesUpIntervalRef.current = null
+    }
+    
     setRoundComplete(true)
+    setShowTimesUp(false)
+    setTimesUpLeft(0)
     onSkip(word)
   }
 
@@ -1012,7 +1072,7 @@ const GameRound = ({
             <button
               type="button"
               className="ghost-button"
-              disabled={roundComplete}
+              disabled={roundComplete && !showTimesUp}
               onClick={handleSkip}
             >
               Skip round

@@ -22,9 +22,18 @@
 
 .app-header h1 {
   margin: 0;
-  font-size: clamp(1.2rem, 4vw, 2rem);
+  font-size: clamp(1.8rem, 5vw, 3rem);
   color: #2d5016;
   text-shadow: 2px 2px 0px #8b6f47;
+}
+
+.clickable-title {
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.clickable-title:hover {
+  opacity: 0.8;
 }
 
 .eyebrow {
