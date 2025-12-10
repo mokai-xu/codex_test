@@ -3,14 +3,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { WORD_POOL } from './data/wordPool'
 import { verifyLyricsContainWord } from './services/lyricsValidation'
+import {
+  getDeviceId,
+  addPlayerToRoom,
+  removePlayerFromRoom,
+  updateRoomState,
+  watchRoomState,
+  clearRoom,
+  submitPlayerAnswer,
+  timeoutRound,
+  skipRound
+} from './services/websocketSync'
 
 const ROUND_TOTAL = 10
 const DEFAULT_TIMER = 20
 
-const createId = () =>
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2, 9)
 
 const createRoomId = () => {
   // Generate a short, shareable room ID (e.g., "ABC123")
@@ -62,20 +69,30 @@ const pickWords = (pool: string[], count: number) => {
 const emptySubmissionHistory: RoundResult[] = []
 
 function App() {
+  const deviceId = useMemo(() => getDeviceId(), [])
   const [phase, setPhase] = useState<Phase>('lobby')
   const [roomId, setRoomId] = useState<string>('')
   const [joinRoomId, setJoinRoomId] = useState<string>('')
+  const [myPlayer, setMyPlayer] = useState<LobbyPlayer | null>(null)
   const [lobbyPlayers, setLobbyPlayers] = useState<LobbyPlayer[]>([])
+  const [roomPlayers, setRoomPlayers] = useState<Array<{ id: string; name: string; deviceId: string }>>([])
   const [roster, setRoster] = useState<LobbyPlayer[]>([])
   const [players, setPlayers] = useState<Player[]>([])
   const [roundDuration, setRoundDuration] = useState(DEFAULT_TIMER)
   const [roundWords, setRoundWords] = useState<string[]>([])
   const [currentRound, setCurrentRound] = useState(0)
   const [history, setHistory] = useState<RoundResult[]>(emptySubmissionHistory)
+  const [playerNameInput, setPlayerNameInput] = useState<string>('')
+  const [isGameMaster, setIsGameMaster] = useState(false)
 
   const activeWord = roundWords[currentRound] ?? ''
-  const gameMaster = roster[0] ?? null
-  const canStartGame = lobbyPlayers.length > 0
+  const [gameMasterId, setGameMasterId] = useState<string | null>(null)
+  
+  // Get game master from room state using gameMasterId
+  const gameMaster = useMemo(() => {
+    if (!gameMasterId || roster.length === 0) return roster[0] ?? null
+    return roster.find((p) => p.id === gameMasterId) || roster[0] || null
+  }, [gameMasterId, roster])
   const rosterKey = useMemo(
     () => roster.map((player) => player.id).join('-'),
     [roster]
@@ -86,7 +103,7 @@ function App() {
   )
 
   const startGameWithRoster = useCallback((selectedRoster: LobbyPlayer[]) => {
-    if (!selectedRoster.length) {
+    if (!selectedRoster.length || !roomId) {
       return
     }
 
@@ -100,37 +117,51 @@ function App() {
       score: 0
     }))
 
+    const words = pickWords(WORD_POOL, ROUND_TOTAL)
+
+    // Update local state optimistically
     setRoster(freshRoster)
     setPlayers(seededPlayers)
-    setRoundWords(pickWords(WORD_POOL, ROUND_TOTAL))
+    setRoundWords(words)
     setCurrentRound(0)
     setHistory(emptySubmissionHistory)
     setPhase('playing')
-  }, [])
 
-  const advanceRound = useCallback(() => {
-    setCurrentRound((prev) => {
-      const nextIndex = prev + 1
+    // Sync to room state via WebSocket (game master only)
+    if (myPlayer && roomId) {
+      // Use roomPlayers which has deviceId
+      const playersWithDeviceId = selectedRoster.map((p) => {
+        const roomPlayer = roomPlayers.find((rp) => rp.id === p.id)
+        return {
+          id: p.id,
+          name: p.name,
+          deviceId: roomPlayer?.deviceId || ''
+        }
+      }).filter((p) => p.deviceId) // Only include players with deviceId
 
-      if (nextIndex >= roundWords.length) {
-        setPhase('leaderboard')
-        return prev
-      }
+      updateRoomState(roomId, {
+        players: playersWithDeviceId,
+        roundDuration,
+        phase: 'playing',
+        roundWords: words,
+        currentRound: 0,
+        playersWithScores: seededPlayers,
+        history: emptySubmissionHistory,
+        gameMasterId: myPlayer.id
+      })
+    }
+  }, [roomId, myPlayer, roundDuration, roomPlayers])
 
-      return nextIndex
-    })
-  }, [roundWords, setPhase])
+  // Round advancement is now handled by the server automatically
 
   const handleRoundWin = useCallback(
     ({ playerId, word, song, artist }: RoundSuccessPayload) => {
-      setPlayers((prev) =>
-        prev.map((player) =>
-          player.id === playerId
-            ? { ...player, score: player.score + 1 }
-            : player
-        )
-      )
+      // Submit to server via WebSocket
+      if (roomId) {
+        submitPlayerAnswer(roomId, playerId, word, song, artist)
+      }
 
+      // Local state will be updated via room-state event
       setHistory((prev) => [
         ...prev,
         {
@@ -141,40 +172,46 @@ function App() {
           artist
         }
       ])
-
-      advanceRound()
     },
-    [advanceRound]
+    [roomId]
   )
 
   const handleRoundTimeout = useCallback(
     (word: string) => {
+      // Submit to server via WebSocket (game master only)
+      if (roomId) {
+        timeoutRound(roomId, word)
+      }
+
+      // Local state will be updated via room-state event
       setHistory((prev) => [
         ...prev,
         {
           word,
-          outcome: 'timeout'
+          outcome: 'timeout' as const
         }
       ])
-
-      advanceRound()
     },
-    [advanceRound]
+    [roomId]
   )
 
   const handleRoundSkip = useCallback(
     (word: string) => {
+      // Submit to server via WebSocket (game master only)
+      if (roomId) {
+        skipRound(roomId, word)
+      }
+
+      // Local state will be updated via room-state event
       setHistory((prev) => [
         ...prev,
         {
           word,
-          outcome: 'skipped'
+          outcome: 'skipped' as const
         }
       ])
-
-      advanceRound()
     },
-    [advanceRound]
+    [roomId]
   )
 
   const handleReshuffleWord = useCallback(() => {
@@ -200,29 +237,57 @@ function App() {
         candidates[Math.floor(Math.random() * candidates.length)]
       const updated = [...prev]
       updated[currentRound] = nextWord
+
+      // Sync to room state via WebSocket
+      if (roomId) {
+        updateRoomState(roomId, {
+          roundWords: updated
+        })
+      }
+
       return updated
     })
-  }, [currentRound, history])
+  }, [currentRound, history, roomId])
 
   const handleCreateRoom = useCallback(() => {
     const newRoomId = createRoomId()
     setRoomId(newRoomId)
+    setMyPlayer(null)
+    setLobbyPlayers([])
     // Update URL with room ID
     const url = new URL(window.location.href)
     url.searchParams.set('room', newRoomId)
     window.history.pushState({}, '', url.toString())
+    // Clear any existing room state
+    clearRoom(newRoomId)
   }, [])
 
   const handleJoinRoom = useCallback(() => {
     const trimmed = joinRoomId.trim().toUpperCase()
     if (trimmed.length === 6) {
       setRoomId(trimmed)
+      setMyPlayer(null)
+      setJoinRoomId('')
       const url = new URL(window.location.href)
       url.searchParams.set('room', trimmed)
       window.history.pushState({}, '', url.toString())
-      setJoinRoomId('')
+      // Room state will be loaded via WebSocket watchRoomState
     }
   }, [joinRoomId])
+
+  const handleAddMyself = useCallback(() => {
+    if (!roomId || !playerNameInput.trim()) return
+
+    addPlayerToRoom(roomId, playerNameInput.trim(), deviceId)
+    setPlayerNameInput('')
+    // Player will be set when room-state event arrives
+  }, [roomId, playerNameInput, deviceId])
+
+  const handleRemoveMyself = useCallback(() => {
+    if (!roomId) return
+    removePlayerFromRoom(roomId, deviceId)
+    setMyPlayer(null)
+  }, [roomId, deviceId])
 
   const handleCopyRoomId = useCallback(() => {
     if (roomId) {
@@ -235,27 +300,91 @@ function App() {
     const urlParams = new URLSearchParams(window.location.search)
     const roomParam = urlParams.get('room')
     if (roomParam && roomParam.length === 6) {
-      setRoomId(roomParam.toUpperCase())
+      const upperRoomId = roomParam.toUpperCase()
+      setRoomId(upperRoomId)
+      // Room state will be loaded via WebSocket watchRoomState
     }
   }, [])
 
-  const handleAddPlayer = (name: string) => {
-    const trimmed = name.trim()
+  // Sync room state across devices/tabs
+  useEffect(() => {
+    if (!roomId) return
 
-    if (!trimmed) {
-      return
-    }
+    const unwatch = watchRoomState(roomId, (state) => {
+      if (!state) {
+        setLobbyPlayers([])
+        setPhase('lobby')
+        return
+      }
 
-    setLobbyPlayers((prev) => [...prev, { id: createId(), name: trimmed }])
-  }
+      // Always update players list from room state
+      const playersFromState = state.players.map((p) => ({ id: p.id, name: p.name }))
+      setLobbyPlayers(playersFromState)
+      setRoomPlayers(state.players) // Store full player data with deviceId
+      
+      setRoundDuration(state.roundDuration)
+      setPhase(state.phase)
+      setRoundWords(state.roundWords)
+      setCurrentRound(state.currentRound)
+      setHistory(state.history)
+      setGameMasterId(state.gameMasterId)
 
-  const handleRemovePlayer = (playerId: string) => {
-    setLobbyPlayers((prev) => prev.filter((player) => player.id !== playerId))
-  }
+      if (state.phase === 'playing') {
+        // If playersWithScores exists, use it, otherwise create from players
+        if (state.playersWithScores.length > 0) {
+          setPlayers(state.playersWithScores)
+        } else {
+          // Initialize players with scores of 0
+          setPlayers(state.players.map((p) => ({ id: p.id, name: p.name, score: 0 })))
+        }
+        setRoster(playersFromState)
+      } else if (state.phase === 'leaderboard') {
+        if (state.playersWithScores.length > 0) {
+          setPlayers(state.playersWithScores)
+        } else {
+          setPlayers(state.players.map((p) => ({ id: p.id, name: p.name, score: 0 })))
+        }
+        setRoster(playersFromState)
+      } else if (state.phase === 'lobby') {
+        // In lobby, ensure roster is set to current players
+        setRoster(playersFromState)
+        setPlayers([])
+      }
+
+      // Update my player if it exists
+      const myPlayerInRoom = state.players.find((p) => p.deviceId === deviceId)
+      if (myPlayerInRoom) {
+        setMyPlayer({ id: myPlayerInRoom.id, name: myPlayerInRoom.name })
+        setIsGameMaster(state.gameMasterId === myPlayerInRoom.id)
+      } else {
+        // Only clear myPlayer if we're not in the process of adding ourselves
+        // This prevents flickering when joining
+        if (myPlayer && !playerNameInput.trim()) {
+          setMyPlayer(null)
+          setIsGameMaster(false)
+        }
+      }
+    })
+
+    return unwatch
+  }, [roomId, deviceId, myPlayer, playerNameInput])
+
 
   const handleStartGame = () => {
-    startGameWithRoster(lobbyPlayers)
+    if (lobbyPlayers.length > 0) {
+      startGameWithRoster(lobbyPlayers)
+    }
   }
+
+  const handleTimerChange = useCallback((timer: number) => {
+    setRoundDuration(timer)
+    // Sync to room state via WebSocket (game master only)
+    if (roomId && myPlayer) {
+      updateRoomState(roomId, {
+        roundDuration: timer
+      })
+    }
+  }, [roomId, myPlayer])
 
   const handleReplay = () => {
     if (!roster.length) {
@@ -297,27 +426,31 @@ function App() {
       {phase === 'lobby' && (
         <Lobby
           players={lobbyPlayers}
+          myPlayer={myPlayer}
+          playerNameInput={playerNameInput}
           timer={roundDuration}
           roomId={roomId}
           joinRoomId={joinRoomId}
-          onAddPlayer={handleAddPlayer}
-          onRemovePlayer={handleRemovePlayer}
-          onTimerChange={setRoundDuration}
+          onAddMyself={handleAddMyself}
+          onRemoveMyself={handleRemoveMyself}
+          onPlayerNameInputChange={setPlayerNameInput}
+          onTimerChange={handleTimerChange}
           onStart={handleStartGame}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
           onJoinRoomIdChange={setJoinRoomId}
           onCopyRoomId={handleCopyRoomId}
-          canStart={canStartGame}
+          canStart={lobbyPlayers.length > 0 && myPlayer !== null}
+          isGameMaster={isGameMaster}
         />
       )}
 
-      {phase === 'playing' && players.length > 0 && activeWord && (
+      {phase === 'playing' && roundWords.length > 0 && activeWord && myPlayer && (players.length > 0 || roster.length > 0) && (
         <>
           <Scoreboard players={players} />
           <GameRound
             key={roundInstanceKey}
-            roster={roster}
+            myPlayer={myPlayer}
             gameMaster={gameMaster}
             word={activeWord}
             roundIndex={currentRound}
@@ -345,12 +478,16 @@ function App() {
 
 interface LobbyProps {
   players: LobbyPlayer[]
+  myPlayer: LobbyPlayer | null
+  playerNameInput: string
   timer: number
   roomId: string
   joinRoomId: string
   canStart: boolean
-  onAddPlayer: (name: string) => void
-  onRemovePlayer: (playerId: string) => void
+  isGameMaster: boolean
+  onAddMyself: () => void
+  onRemoveMyself: () => void
+  onPlayerNameInputChange: (name: string) => void
   onTimerChange: (timer: number) => void
   onStart: () => void
   onCreateRoom: () => void
@@ -361,12 +498,16 @@ interface LobbyProps {
 
 const Lobby = ({
   players,
+  myPlayer,
+  playerNameInput,
   timer,
   roomId,
   joinRoomId,
   canStart,
-  onAddPlayer,
-  onRemovePlayer,
+  isGameMaster,
+  onAddMyself,
+  onRemoveMyself,
+  onPlayerNameInputChange,
   onTimerChange,
   onStart,
   onCreateRoom,
@@ -374,12 +515,9 @@ const Lobby = ({
   onJoinRoomIdChange,
   onCopyRoomId
 }: LobbyProps) => {
-  const [nameInput, setNameInput] = useState('')
-
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    onAddPlayer(nameInput)
-    setNameInput('')
+    onAddMyself()
   }
 
   return (
@@ -443,64 +581,93 @@ const Lobby = ({
         )}
       </div>
 
-      <form className="player-form" onSubmit={handleSubmit}>
-        <div className="input-group">
-          <label htmlFor="player-name">Add player</label>
-          <div className="stacked-input">
-            <input
-              id="player-name"
-              type="text"
-              placeholder="Type a name"
-              value={nameInput}
-              onChange={(event) => setNameInput(event.target.value)}
-            />
-            <button type="submit" className="ghost-button">
-              Add
-            </button>
+      {!myPlayer ? (
+        <form className="player-form" onSubmit={handleSubmit}>
+          <div className="input-group">
+            <label htmlFor="player-name">Enter your name</label>
+            <div className="stacked-input">
+              <input
+                id="player-name"
+                type="text"
+                placeholder="Type your name"
+                value={playerNameInput}
+                onChange={(event) => onPlayerNameInputChange(event.target.value)}
+                maxLength={20}
+              />
+              <button type="submit" className="ghost-button" disabled={!playerNameInput.trim() || !roomId}>
+                Join
+              </button>
+            </div>
+            {!roomId && (
+              <p className="room-hint" style={{ marginTop: '0.5rem' }}>
+                Create or join a room first
+              </p>
+            )}
+          </div>
+        </form>
+      ) : (
+        <div className="my-player-section">
+          <div className="input-group">
+            <label>Your player</label>
+            <div className="my-player-card">
+              <span>{myPlayer.name}</span>
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={onRemoveMyself}
+              >
+                Leave
+              </button>
+            </div>
           </div>
         </div>
-      </form>
+      )}
 
-      <ul className="player-chips">
-        {players.map((player) => (
-          <li key={player.id}>
-            <span>{player.name}</span>
-            <button
-              type="button"
-              onClick={() => onRemovePlayer(player.id)}
-              aria-label={`Remove ${player.name}`}
-            >
-              ×
-            </button>
-          </li>
-        ))}
-        {!players.length && (
-          <li className="placeholder">No players yet — add one to begin.</li>
-        )}
-      </ul>
-
-      <div className="timer-control">
-        <label htmlFor="round-timer">Round timer</label>
-        <input
-          id="round-timer"
-          type="range"
-          min={10}
-          max={60}
-          step={5}
-          value={timer}
-          onChange={(event) => onTimerChange(Number(event.target.value))}
-        />
-        <p className="timer-value">{timer} seconds per word</p>
+      <div className="players-section">
+        <h3>Players in room ({players.length})</h3>
+        <ul className="player-chips">
+          {players.map((player) => (
+            <li key={player.id}>
+              <span>{player.name}</span>
+              {player.id === myPlayer?.id && <span className="you-badge">You</span>}
+            </li>
+          ))}
+          {!players.length && (
+            <li className="placeholder">No players in room yet</li>
+          )}
+        </ul>
       </div>
 
-      <button
-        type="button"
-        className="primary-button"
-        disabled={!canStart}
-        onClick={onStart}
-      >
-        Start 10-round game
-      </button>
+      {isGameMaster && (
+        <>
+          <div className="timer-control">
+            <label htmlFor="round-timer">Round timer</label>
+            <input
+              id="round-timer"
+              type="range"
+              min={10}
+              max={60}
+              step={5}
+              value={timer}
+              onChange={(event) => onTimerChange(Number(event.target.value))}
+            />
+            <p className="timer-value">{timer} seconds per word</p>
+          </div>
+
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!canStart}
+            onClick={onStart}
+          >
+            Start 10-round game
+          </button>
+        </>
+      )}
+
+      {!isGameMaster && canStart && (
+        <p className="waiting-message">Waiting for game master to start the game...</p>
+      )}
     </section>
   )
 }
@@ -524,7 +691,7 @@ const Scoreboard = ({ players }: { players: Player[] }) => (
 )
 
 interface GameRoundProps {
-  roster: LobbyPlayer[]
+  myPlayer: LobbyPlayer
   gameMaster: LobbyPlayer | null
   word: string
   roundIndex: number
@@ -545,18 +712,9 @@ interface SubmissionState {
   message?: string
 }
 
-const createSubmissionState = (players: LobbyPlayer[]) =>
-  players.reduce<Record<string, SubmissionState>>((state, player) => {
-    state[player.id] = {
-      song: '',
-      artist: '',
-      status: 'idle'
-    }
-    return state
-  }, {})
 
 const GameRound = ({
-  roster,
+  myPlayer,
   gameMaster,
   word,
   roundIndex,
@@ -572,28 +730,67 @@ const GameRound = ({
   const [showTimesUp, setShowTimesUp] = useState(false)
   const [timesUpLeft, setTimesUpLeft] = useState(0)
   const [reshuffleUsed, setReshuffleUsed] = useState(false)
-  const [submissions, setSubmissions] = useState<Record<string, SubmissionState>>(
-    () => createSubmissionState(roster)
-  )
+  const [submission, setSubmission] = useState<SubmissionState>({
+    song: '',
+    artist: '',
+    status: 'idle'
+  })
   const timeoutRef = useRef<number | null>(null)
   const timesUpIntervalRef = useRef<number | null>(null)
 
   // Reset timer and reshuffle when round changes
   useEffect(() => {
+    // Clear any existing timers
+    if (timeoutRef.current) {
+      window.clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
+    }
+    if (timesUpIntervalRef.current) {
+      window.clearInterval(timesUpIntervalRef.current)
+      timesUpIntervalRef.current = null
+    }
+    
+    // Reset state
     setTimeLeft(duration)
     setRoundComplete(false)
     setShowTimesUp(false)
     setTimesUpLeft(0)
     setReshuffleUsed(false)
-  }, [roundIndex, duration])
+  }, [roundIndex, duration, word])
 
   const percentLeft = (timeLeft / duration) * 100
 
   useEffect(() => {
-    if (roundComplete || timeLeft <= 0) {
+    // Don't run timer if round is complete or time is already at 0
+    if (roundComplete) {
       return
     }
 
+    // If timeLeft is already 0 or less, trigger timeout immediately
+    if (timeLeft <= 0) {
+      setRoundComplete(true)
+      setShowTimesUp(true)
+      setTimesUpLeft(5)
+      timesUpIntervalRef.current = window.setInterval(() => {
+        setTimesUpLeft((left) => {
+          if (left <= 1) {
+            if (timesUpIntervalRef.current) {
+              window.clearInterval(timesUpIntervalRef.current)
+            }
+            // Only game master should trigger timeout on server
+            // Other clients will receive the update via room-state event
+            if (gameMaster && myPlayer.id === gameMaster.id) {
+              onTimeout(word)
+            }
+            return 0
+          }
+          return left - 1
+        })
+      }, 1000)
+      return
+    }
+
+    // Set up the countdown timer
     timeoutRef.current = window.setTimeout(() => {
       setTimeLeft((prev) => {
         const newTime = prev - 1
@@ -607,7 +804,11 @@ const GameRound = ({
                 if (timesUpIntervalRef.current) {
                   window.clearInterval(timesUpIntervalRef.current)
                 }
-                onTimeout(word)
+                // Only game master should trigger timeout on server
+                // Other clients will receive the update via room-state event
+                if (gameMaster && myPlayer.id === gameMaster.id) {
+                  onTimeout(word)
+                }
                 return 0
               }
               return left - 1
@@ -623,9 +824,10 @@ const GameRound = ({
     return () => {
       if (timeoutRef.current) {
         window.clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
       }
     }
-  }, [roundComplete, timeLeft, onTimeout, word])
+  }, [roundComplete, timeLeft, onTimeout, word, gameMaster, myPlayer])
 
   useEffect(
     () => () => {
@@ -654,73 +856,79 @@ const GameRound = ({
   }
 
   const handleSubmissionChange = (
-    playerId: string,
     field: 'song' | 'artist',
     value: string
   ) => {
-    setSubmissions((prev) => ({
+    setSubmission((prev) => ({
       ...prev,
-      [playerId]: {
-        ...prev[playerId],
-        [field]: value
-      }
+      [field]: value
     }))
   }
 
-  const handleSubmit = async (playerId: string) => {
+  const handleSubmit = async () => {
     if (roundComplete) {
       return
     }
 
-    const submission = submissions[playerId]
     const { song, artist } = submission
 
     if (!song.trim() || !artist.trim()) {
-      setSubmissions((prev) => ({
+      setSubmission((prev) => ({
         ...prev,
-        [playerId]: {
-          ...prev[playerId],
-          status: 'error',
-          message: 'Enter both song and artist.'
-        }
+        status: 'error',
+        message: 'Enter both song and artist.'
       }))
       return
     }
 
-    setSubmissions((prev) => ({
+    // Prevent multiple submissions
+    if (submission.status === 'validating') {
+      return
+    }
+
+    setSubmission((prev) => ({
       ...prev,
-      [playerId]: {
-        ...prev[playerId],
-        status: 'validating',
-        message: 'Checking lyrics...'
-      }
+      status: 'validating',
+      message: 'Checking lyrics...'
     }))
 
-    const result = await verifyLyricsContainWord({ song, artist, word })
+    try {
+      const result = await verifyLyricsContainWord({ song, artist, word })
 
-    if (result.ok) {
-      setSubmissions((prev) => ({
-        ...prev,
-        [playerId]: {
-          ...prev[playerId],
+      if (result.ok) {
+        setSubmission((prev) => ({
+          ...prev,
           status: 'success',
           message: 'Word found!'
-        }
-      }))
-      setRoundComplete(true)
-      onSuccess({ playerId, word, song, artist })
-      return
-    }
+        }))
+        setRoundComplete(true)
+        onSuccess({ playerId: myPlayer.id, word, song, artist })
+        return
+      }
 
-    setSubmissions((prev) => ({
-      ...prev,
-      [playerId]: {
-        ...prev[playerId],
+      setSubmission((prev) => ({
+        ...prev,
         status: 'error',
         message: result.reason ?? 'No luck this time.'
-      }
-    }))
+      }))
+    } catch (error) {
+      console.error('Error checking lyrics:', error)
+      setSubmission((prev) => ({
+        ...prev,
+        status: 'error',
+        message: 'Network error. Please try again.'
+      }))
+    }
   }
+
+  // Reset submission when round changes
+  useEffect(() => {
+    setSubmission({
+      song: '',
+      artist: '',
+      status: 'idle'
+    })
+  }, [roundIndex, word])
 
   return (
     <section className="panel round">
@@ -771,66 +979,59 @@ const GameRound = ({
         )}
       </div>
 
-      <div className="player-grid">
-        {roster.map((player) => {
-          const submission = submissions[player.id]
-          const disabled =
-            roundComplete || submission.status === 'success' || timeLeft <= 0
+      <div className="player-submission">
+        <article className="player-card">
+          <header>
+            <span>{myPlayer.name}</span>
+            <small>Round {roundIndex + 1} of {totalRounds}</small>
+          </header>
 
-          return (
-            <article key={player.id} className="player-card">
-              <header>
-                <span>{player.name}</span>
-                <small>Playing to {totalRounds} words</small>
-              </header>
+          <label>
+            Song title
+            <input
+              type="text"
+              value={submission.song}
+              placeholder="e.g. Electric Feel"
+              disabled={roundComplete || submission.status === 'success' || timeLeft <= 0}
+              onChange={(event) =>
+                handleSubmissionChange('song', event.target.value)
+              }
+            />
+          </label>
 
-              <label>
-                Song title
-                <input
-                  type="text"
-                  value={submission.song}
-                  placeholder="e.g. Electric Feel"
-                  disabled={disabled}
-                  onChange={(event) =>
-                    handleSubmissionChange(player.id, 'song', event.target.value)
-                  }
-                />
-              </label>
+          <label>
+            Artist
+            <input
+              type="text"
+              value={submission.artist}
+              placeholder="e.g. MGMT"
+              disabled={roundComplete || submission.status === 'success' || timeLeft <= 0}
+              onChange={(event) =>
+                handleSubmissionChange('artist', event.target.value)
+              }
+            />
+          </label>
 
-              <label>
-                Artist
-                <input
-                  type="text"
-                  value={submission.artist}
-                  placeholder="e.g. MGMT"
-                  disabled={disabled}
-                  onChange={(event) =>
-                    handleSubmissionChange(
-                      player.id,
-                      'artist',
-                      event.target.value
-                    )
-                  }
-                />
-              </label>
+          <button
+            type="button"
+            className="primary-button subtle"
+            disabled={
+              roundComplete ||
+              submission.status === 'success' ||
+              submission.status === 'validating' ||
+              timeLeft <= 0
+            }
+            onClick={handleSubmit}
+          >
+            {submission.status === 'validating' ? 'Checking…' : 'Submit'}
+          </button>
 
-              <button
-                type="button"
-                className="primary-button subtle"
-                disabled={disabled || submission.status === 'validating'}
-                onClick={() => handleSubmit(player.id)}
-              >
-                {submission.status === 'validating' ? 'Checking…' : 'Submit'}
-              </button>
-
-              {submission.message && (
-                <p className={`status ${submission.status}`}>
-                  {submission.message}
-                </p>
-              )}
-            </article>
-          )
-        })}
+          {submission.message && (
+            <p className={`status ${submission.status}`}>
+              {submission.message}
+            </p>
+          )}
+        </article>
       </div>
     </section>
   )
@@ -905,3 +1106,4 @@ const Leaderboard = ({
 )
 
 export default App
+

@@ -11,12 +11,43 @@ A minimalist single- or multi-player challenge built with React + Vite. Configur
 - Post-game leaderboard with round-by-round recap, replay, and lobby shortcuts
 
 ## Getting Started
+
+### Prerequisites
+- Node.js 18+ installed
+- npm or yarn package manager
+
+### Installation
 ```bash
 cd song-association-game
 npm install
+```
+
+### Running the Application
+
+**Option 1: Run everything together (recommended)**
+```bash
+npm run dev:all
+```
+This starts both the WebSocket server and the Vite dev server concurrently.
+
+**Option 2: Run separately**
+```bash
+# Terminal 1: Start WebSocket server
+npm run dev:server
+
+# Terminal 2: Start frontend dev server
 npm run dev
 ```
-The dev server prints a local URL (default `http://localhost:5173`). Open it in a modern browser.
+
+The frontend dev server will be available at `http://localhost:5173` (default).
+The WebSocket server runs on `ws://localhost:3002` (default).
+
+### Cross-Device Multiplayer
+The game now supports true cross-device multiplayer via WebSockets! Multiple users can join the same room from different devices and play together in real-time.
+
+1. One player creates a room and shares the room ID
+2. Other players join using the room ID
+3. All players see each other and can play simultaneously
 
 ## Gameplay Flow
 1. **Lobby** – Add at least one player, adjust the timer (10–60 seconds), and start the 10-word session.

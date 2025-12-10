@@ -286,6 +286,54 @@
   font-size: 0.7rem;
 }
 
+.player-chips .you-badge {
+  font-size: 0.6rem;
+  background: #5a7c2f;
+  color: #f4e4bc;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid #2d5016;
+}
+
+.my-player-section {
+  margin-bottom: 1.5rem;
+}
+
+.my-player-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.8rem;
+  background: #e8d5b7;
+  border: 2px solid #8b6f47;
+  font-size: 0.7rem;
+  box-shadow: 2px 2px 0px #8b6f47;
+}
+
+.my-player-card span {
+  color: #2d5016;
+  font-weight: bold;
+}
+
+.players-section {
+  margin-bottom: 1.5rem;
+}
+
+.players-section h3 {
+  font-size: 0.8rem;
+  color: #2d5016;
+  margin: 0 0 0.5rem;
+}
+
+.waiting-message {
+  text-align: center;
+  padding: 1rem;
+  background: #e8d5b7;
+  border: 2px solid #8b6f47;
+  color: #5a7c2f;
+  font-size: 0.7rem;
+  box-shadow: 2px 2px 0px #8b6f47;
+}
+
 .timer-control {
   margin-bottom: 1.25rem;
 }
@@ -421,6 +469,11 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 1rem;
+}
+
+.player-submission {
+  display: flex;
+  justify-content: center;
 }
 
 .player-card {
