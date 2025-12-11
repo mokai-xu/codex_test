@@ -188,11 +188,12 @@ class WebSocketClient {
     })
   }
 
-  addPlayer(playerName: string): void {
+  addPlayer(playerName: string, roomId?: string): void {
     this.send({
       type: 'add-player',
       playerName,
-      deviceId: this.deviceId
+      deviceId: this.deviceId,
+      roomId
     })
   }
 
@@ -319,13 +320,13 @@ export function addPlayerToRoom(
     // Queue the action
     client.connect().then(() => {
       client.joinRoom(roomId)
-      client.addPlayer(playerName)
+      client.addPlayer(playerName, roomId)
     }).catch(console.error)
     return null
   }
 
   client.joinRoom(roomId)
-  client.addPlayer(playerName)
+  client.addPlayer(playerName, roomId)
   
   // Return a placeholder - actual player will come from room-state event
   return { id: 'pending', name: playerName, deviceId }

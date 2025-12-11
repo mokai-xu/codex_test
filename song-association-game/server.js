@@ -273,12 +273,43 @@ wss.on('connection', (ws) => {
         }
 
         case 'add-player': {
-          if (!currentRoomId) break;
+          const { playerName, deviceId: devId, roomId } = data;
+          
+          // If roomId is provided, ensure we're in that room
+          if (roomId && roomId !== currentRoomId) {
+            currentRoomId = roomId;
+            deviceId = devId;
+            clientRooms.set(ws, roomId);
+            
+            // Get or create room
+            if (!rooms.has(roomId)) {
+              rooms.set(roomId, {
+                roomId,
+                players: [],
+                phase: 'lobby',
+                roundDuration: 20,
+                roundWords: [],
+                currentRound: 0,
+                playersWithScores: [],
+                history: [],
+                gameMasterId: null,
+                lastUpdated: Date.now()
+              });
+            }
+          }
+          
+          if (!currentRoomId) {
+            // Can't add player without being in a room
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Must join a room before adding a player'
+            }));
+            break;
+          }
+          
           const room = rooms.get(currentRoomId);
           if (!room) break;
 
-          const { playerName, deviceId: devId } = data;
-          
           // Check if device already has a player
           const existingPlayer = room.players.find(p => p.deviceId === devId);
           if (existingPlayer) {
@@ -301,11 +332,17 @@ wss.on('connection', (ws) => {
           room.lastUpdated = Date.now();
           rooms.set(currentRoomId, room);
 
-          // Broadcast updated state to all clients
+          // Broadcast updated state to ALL clients including sender
           broadcastToRoom(currentRoomId, {
             type: 'room-state',
             state: room
           });
+          
+          // Also send directly to the sender to ensure they get the update
+          ws.send(JSON.stringify({
+            type: 'room-state',
+            state: room
+          }));
 
           break;
         }
@@ -326,11 +363,17 @@ wss.on('connection', (ws) => {
           room.lastUpdated = Date.now();
           rooms.set(currentRoomId, room);
 
-          // Broadcast updated state
+          // Broadcast updated state to ALL clients including sender
           broadcastToRoom(currentRoomId, {
             type: 'room-state',
             state: room
           });
+          
+          // Also send directly to the sender to ensure they get the update
+          ws.send(JSON.stringify({
+            type: 'room-state',
+            state: room
+          }));
 
           break;
         }
