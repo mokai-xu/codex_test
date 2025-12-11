@@ -56,3 +56,75 @@ The game now supports true cross-device multiplayer via WebSockets! Multiple use
 
 ## Lyrics Validation
 Song checks call the public `lyrics.ovh` endpoint. Responses can be slow or rate-limited, so failed validations surface actionable error states (lyrics not found, network issues, or missing word). For production, consider swapping in a more reliable lyrics provider with authentication, caching, and debouncing per player.
+
+## Deployment to Render
+
+This app is configured to deploy on [Render](https://render.com) with WebSocket support.
+
+### Prerequisites
+- A GitHub account with this repository
+- A Render account (free tier available)
+
+### Deployment Steps
+
+1. **Push your code to GitHub** (if not already done):
+   ```bash
+   git add .
+   git commit -m "Prepare for Render deployment"
+   git push origin main
+   ```
+
+2. **Create a new Web Service on Render**:
+   - Go to [Render Dashboard](https://dashboard.render.com)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repository
+   - Select the repository and branch
+
+3. **Configure the service**:
+   - **Name**: `song-association-game` (or your preferred name)
+   - **Environment**: `Node`
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+   - **Plan**: Free (or choose a paid plan)
+
+4. **Environment Variables** (optional):
+   - `NODE_ENV`: `production` (automatically set by Render)
+   - `VITE_WS_URL`: Leave empty (auto-detected in production)
+
+5. **Deploy**:
+   - Click "Create Web Service"
+   - Render will build and deploy your app
+   - The app will be available at `https://your-app-name.onrender.com`
+
+### How It Works
+
+- The server combines HTTP and WebSocket on a single port (required by Render)
+- In production, the server automatically serves static files from the `dist/` directory
+- WebSocket connections automatically use `wss://` (secure WebSocket) in production
+- The health check endpoint is available at `/health`
+
+### Manual Deployment (Alternative)
+
+If you prefer to use the `render.yaml` file:
+
+1. Ensure `render.yaml` is in your repository root
+2. In Render Dashboard, go to "New +" → "Blueprint"
+3. Connect your repository
+4. Render will automatically detect and use `render.yaml`
+
+### Troubleshooting
+
+- **WebSocket not connecting**: Ensure your Render service is using HTTPS (free tier includes this)
+- **Static files not loading**: Make sure `npm run build` completed successfully
+- **Port errors**: Render automatically sets the `PORT` environment variable - don't override it
+
+### Local Production Testing
+
+To test the production build locally:
+
+```bash
+npm run build
+npm start
+```
+
+The app will be available at `http://localhost:3001` with WebSocket at `ws://localhost:3001`.

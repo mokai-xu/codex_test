@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "dev:server": "node server.js",
-    "dev:all": "concurrently \"npm run dev:server\" \"npm run dev\""
+    "dev:all": "concurrently \"npm run dev:server\" \"npm run dev\"",
+    "start": "NODE_ENV=production node server.js"
   },
   "dependencies": {
     "react": "^19.2.0",

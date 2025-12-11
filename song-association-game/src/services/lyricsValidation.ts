@@ -1,6 +1,29 @@
 const escapeForRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+// ---- Artist normalization helpers ----
+const stripLeadingThe = (value: string) =>
+  value.replace(/^(the|a|an)\s+/i, '').trim()
+
+const toTitleCase = (value: string) =>
+  value
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : ''))
+    .join(' ')
+
+const buildArtistVariants = (artist: string): string[] => {
+  const trimmed = artist.trim()
+  const variants = [
+    trimmed,
+    toTitleCase(trimmed),
+    stripLeadingThe(trimmed),
+    toTitleCase(stripLeadingThe(trimmed))
+  ]
+  // Remove empty and dedupe
+  return Array.from(new Set(variants.filter(Boolean)))
+}
+
 export interface LyricsCheckResult {
   ok: boolean
   reason?: string
@@ -14,35 +37,27 @@ interface LyricsPayload {
 
 async function tryFetchLyrics(
   artist: string,
-  song: string
+  song: string,
+  timeoutMs: number
 ): Promise<{ lyrics: string } | null> {
   const endpoint = `https://api.lyrics.ovh/v1/${encodeURIComponent(
     artist
   )}/${encodeURIComponent(song)}`
 
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
   try {
-    // Fast timeout - fail quickly if API is slow
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout
-
-    const response = await fetch(endpoint, {
-      signal: controller.signal
-    })
-
-    clearTimeout(timeoutId)
-
+    const response = await fetch(endpoint, { signal: controller.signal })
     if (!response.ok) {
       return null
     }
-
     const payload = (await response.json()) as { lyrics?: string }
     return { lyrics: payload.lyrics ?? '' }
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      // Timeout occurred - API too slow
-      return null
-    }
+  } catch {
     return null
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -58,17 +73,30 @@ export async function verifyLyricsContainWord({
     return { ok: false, reason: 'Please provide both the song and artist.' }
   }
 
-  // Fetch lyrics with exact artist and song name
-  const result = await tryFetchLyrics(trimmedArtist, trimmedSong)
+  // Build a few fast variants for the artist name
+  const variants = buildArtistVariants(trimmedArtist).slice(0, 3)
 
-  if (!result || !result.lyrics) {
+  // Try in parallel with a short timeout (2s each). Pick the first that returns lyrics.
+  const attempts = variants.map((variant) =>
+    tryFetchLyrics(variant, trimmedSong, 2000)
+  )
+
+  const settled = await Promise.allSettled(attempts)
+  const firstLyrics =
+    settled
+      .map((result) =>
+        result.status === 'fulfilled' ? result.value : null
+      )
+      .find((val) => val && val.lyrics)?.lyrics ?? null
+
+  if (!firstLyrics) {
     return {
       ok: false,
       reason: 'Lyrics for that song were not found. Try another pick.'
     }
   }
 
-  const lyrics = result.lyrics
+  const lyrics = firstLyrics
 
   // Exact string matching - check if word exists in lyrics (case-insensitive, whole word)
   const target = escapeForRegex(word.toLowerCase())

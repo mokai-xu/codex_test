@@ -1,35 +1,96 @@
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, extname } from 'path';
+import { randomUUID } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PORT = process.env.PORT || 3001;
-const WS_PORT = process.env.WS_PORT || 3002;
+const isProduction = process.env.NODE_ENV === 'production';
 
 // In-memory room storage
 const rooms = new Map();
 
-// HTTP server for health checks
+// Track which room each client is in
+const clientRooms = new WeakMap();
+
+// Helper function to generate IDs
+function generateId() {
+  return randomUUID();
+}
+
+// MIME types for static files
+const mimeTypes = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+};
+
+// HTTP server that serves static files and handles WebSocket upgrades
 const httpServer = createServer((req, res) => {
+  // Health check endpoint
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', rooms: rooms.size }));
-  } else {
-    res.writeHead(404);
-    res.end('Not found');
+    return;
   }
+
+  // In production, serve static files from dist/
+  if (isProduction) {
+    let filePath = join(__dirname, 'dist', req.url === '/' ? 'index.html' : req.url);
+    
+    // Security: prevent directory traversal
+    if (!filePath.startsWith(join(__dirname, 'dist'))) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    // Check if file exists
+    if (existsSync(filePath) && !filePath.endsWith('/')) {
+      const ext = extname(filePath);
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+      
+      try {
+        const content = readFileSync(filePath);
+        res.writeHead(200, { 'Content-Type': contentType });
+        res.end(content);
+        return;
+      } catch (error) {
+        console.error('Error serving file:', error);
+      }
+    } else {
+      // For SPA routing, serve index.html for non-API routes
+      const indexPath = join(__dirname, 'dist', 'index.html');
+      if (existsSync(indexPath)) {
+        try {
+          const content = readFileSync(indexPath);
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(content);
+          return;
+        } catch (error) {
+          console.error('Error serving index.html:', error);
+        }
+      }
+    }
+  }
+
+  // 404 for everything else
+  res.writeHead(404);
+  res.end('Not found');
 });
 
-httpServer.listen(PORT, () => {
-  console.log(`HTTP server running on port ${PORT}`);
-});
-
-// WebSocket server
-const wss = new WebSocketServer({ port: WS_PORT });
+// WebSocket server attached to HTTP server (same port)
+const wss = new WebSocketServer({ server: httpServer });
 
 wss.on('connection', (ws) => {
   let currentRoomId = null;
@@ -335,9 +396,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Track which room each client is in
-const clientRooms = new WeakMap();
-
 function broadcastToRoom(roomId, message, excludeWs = null) {
   wss.clients.forEach((client) => {
     if (client !== excludeWs && client.readyState === 1) {
@@ -348,12 +406,6 @@ function broadcastToRoom(roomId, message, excludeWs = null) {
       }
     }
   });
-}
-
-import { randomUUID } from 'crypto';
-
-function generateId() {
-  return randomUUID();
 }
 
 // Clean up old rooms (older than 1 hour)
@@ -367,6 +419,13 @@ setInterval(() => {
   }
 }, 60000); // Check every minute
 
-console.log(`WebSocket server running on port ${WS_PORT}`);
-console.log(`HTTP server running on port ${PORT}`);
+// Start server
+httpServer.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`HTTP server: http://localhost:${PORT}`);
+  console.log(`WebSocket server: ws://localhost:${PORT}`);
+  if (isProduction) {
+    console.log('Production mode: serving static files from dist/');
+  }
+});
 

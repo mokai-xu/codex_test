@@ -3,7 +3,25 @@
  * Enables cross-device multiplayer
  */
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:3002';
+// Determine WebSocket URL based on environment
+function getWebSocketURL(): string {
+  // Use explicit environment variable if set
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  
+  // In production, use wss:// with the same host as the page
+  if (import.meta.env.PROD) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    return `${protocol}//${host}`;
+  }
+  
+  // Development: use localhost
+  return 'ws://localhost:3001';
+}
+
+const WS_URL = getWebSocketURL();
 
 export interface RoomState {
   roomId: string
