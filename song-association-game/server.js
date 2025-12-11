@@ -17,6 +17,28 @@ const rooms = new Map();
 // Track which room each client is in
 const clientRooms = new WeakMap();
 
+// Server-side lyrics cache (5 minute TTL)
+const lyricsCache = new Map();
+const LYRICS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_LYRICS_CACHE_SIZE = 500;
+
+// Clean up expired cache entries
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of lyricsCache.entries()) {
+    if (now - value.timestamp > LYRICS_CACHE_TTL) {
+      lyricsCache.delete(key);
+    }
+  }
+  // Limit cache size
+  if (lyricsCache.size > MAX_LYRICS_CACHE_SIZE) {
+    const entries = Array.from(lyricsCache.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const toRemove = entries.slice(0, entries.length - MAX_LYRICS_CACHE_SIZE);
+    toRemove.forEach(([key]) => lyricsCache.delete(key));
+  }
+}, 60000); // Clean up every minute
+
 // Helper function to generate IDs
 function generateId() {
   return randomUUID();
@@ -35,12 +57,120 @@ const mimeTypes = {
   '.ico': 'image/x-icon'
 };
 
+// Lyrics API base URL
+const LYRICS_API_BASE = process.env.LYRICS_API_BASE || 'https://lyrics.lewdhutao.my.eu.org';
+
 // HTTP server that serves static files and handles WebSocket upgrades
-const httpServer = createServer((req, res) => {
+const httpServer = createServer(async (req, res) => {
+  // CORS headers
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  };
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200, corsHeaders);
+    res.end();
+    return;
+  }
+
   // Health check endpoint
   if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
     res.end(JSON.stringify({ status: 'ok', rooms: rooms.size }));
+    return;
+  }
+
+  // Lyrics proxy endpoint
+  if (req.url?.startsWith('/api/lyrics')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const title = url.searchParams.get('title');
+      const artist = url.searchParams.get('artist');
+
+      if (!title || !artist) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ error: 'Missing title or artist parameter' }));
+        return;
+      }
+
+      // Check server-side cache first
+      const cacheKey = `${title.toLowerCase().trim()}|${artist.toLowerCase().trim()}`;
+      const cached = lyricsCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < LYRICS_CACHE_TTL) {
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify(cached.data));
+        return;
+      }
+
+      // Try both endpoints in parallel with Promise.race for faster response
+      const endpoints = [
+        `${LYRICS_API_BASE}/v2/youtube/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`,
+        `${LYRICS_API_BASE}/v2/musixmatch/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`
+      ];
+
+      const attempts = endpoints.map(async (endpoint) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000); // Reduced from 3000ms
+
+        try {
+          const response = await fetch(endpoint, { signal: controller.signal });
+          if (!response.ok) {
+            return null;
+          }
+          const payload = await response.json();
+          
+          if (payload.data?.lyrics) {
+            const lyrics = payload.data.lyrics.trim();
+            // Filter out placeholder text or restricted lyrics
+            if (lyrics && lyrics.length > 10 && !lyrics.includes('...')) {
+              return { lyrics };
+            }
+          }
+          return null;
+        } catch (error) {
+          return null;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      });
+
+      // Use Promise.race to return immediately on first success
+      try {
+        const result = await Promise.race(attempts);
+        if (result && result.lyrics) {
+          // Cache the result
+          lyricsCache.set(cacheKey, { data: result, timestamp: Date.now() });
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify(result));
+          return;
+        }
+      } catch {
+        // Race failed, check all results
+      }
+
+      // Fallback: check all results if race didn't return valid result
+      const results = await Promise.allSettled(attempts);
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value && result.value.lyrics) {
+          // Cache the result
+          lyricsCache.set(cacheKey, { data: result.value, timestamp: Date.now() });
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify(result.value));
+          return;
+        }
+      }
+
+      // No lyrics found
+      res.writeHead(404, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({ error: 'Lyrics not found' }));
+    } catch (error) {
+      console.error('Error in lyrics proxy:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
     return;
   }
 

@@ -201,14 +201,24 @@ function cleanupCache(): void {
   }
 }
 
+// Server proxy endpoint (avoids CORS issues)
+// In development: use localhost:3001, in production: use same origin
+const getLyricsProxyUrl = () => {
+  if (import.meta.env.PROD) {
+    // In production, use relative path (same origin)
+    return '/api/lyrics'
+  }
+  // In development, Vite dev server runs on 5173, but server runs on 3001
+  return 'http://localhost:3001/api/lyrics'
+}
+
 async function tryFetchLyrics(
   artist: string,
   song: string,
-  timeoutMs: number = 1500
+  timeoutMs: number = 2500 // Reduced from 3000ms
 ): Promise<{ lyrics: string } | null> {
-  const endpoint = `https://api.lyrics.ovh/v1/${encodeURIComponent(
-    artist
-  )}/${encodeURIComponent(song)}`
+  const proxyUrl = getLyricsProxyUrl()
+  const endpoint = `${proxyUrl}?title=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
@@ -219,7 +229,11 @@ async function tryFetchLyrics(
       return null
     }
     const payload = (await response.json()) as { lyrics?: string }
-    return { lyrics: payload.lyrics ?? '' }
+    
+    if (payload.lyrics) {
+      return { lyrics: payload.lyrics }
+    }
+    return null
   } catch {
     return null
   } finally {
@@ -260,29 +274,42 @@ export async function verifyLyricsContainWord({
     }
   }
 
-  // Build artist variants (limit to 2 for speed)
-  const variants = buildArtistVariants(trimmedArtist).slice(0, 2)
+  // Try original artist first (fast path - most common case)
+  let result = await tryFetchLyrics(trimmedArtist, trimmedSong, 2500)
+  
+  if (result?.lyrics) {
+    // Success with original artist - cache and check word
+    setCachedLyrics(trimmedArtist, trimmedSong, result.lyrics)
+    
+    // Check if word exists with pluralization variants
+    const wordVariants = getWordVariants(word)
+    const patterns = wordVariants.map(variant => {
+      const escaped = escapeForRegex(variant)
+      return new RegExp(`\\b${escaped}\\b`, 'i')
+    })
 
-  // Try variants in parallel with shorter timeout (1.5s each)
-  const attempts = variants.map((variant) =>
-    tryFetchLyrics(variant, trimmedSong, 1500)
-  )
+    if (patterns.some(regex => regex.test(result.lyrics))) {
+      return { ok: true }
+    }
 
-  const settled = await Promise.allSettled(attempts)
-  const firstResult = settled
-    .map((result) =>
-      result.status === 'fulfilled' ? result.value : null
-    )
-    .find((val) => val && val.lyrics)
+    return {
+      ok: false,
+      reason: `Lyrics found but "${word}" was not detected.`
+    }
+  }
 
-  if (!firstResult || !firstResult.lyrics) {
+  // Original artist failed, try one variant (sequential to reduce requests)
+  const variants = buildArtistVariants(trimmedArtist).slice(0, 1) // Just 1 variant
+  const variantAttempt = await tryFetchLyrics(variants[0], trimmedSong, 2500)
+
+  if (!variantAttempt?.lyrics) {
     return {
       ok: false,
       reason: 'Lyrics for that song were not found. Try another pick.'
     }
   }
 
-  const lyrics = firstResult.lyrics
+  const lyrics = variantAttempt.lyrics
 
   // Cache the result for future use
   setCachedLyrics(trimmedArtist, trimmedSong, lyrics)
