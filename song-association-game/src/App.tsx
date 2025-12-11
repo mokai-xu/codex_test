@@ -84,6 +84,7 @@ function App() {
   const [history, setHistory] = useState<RoundResult[]>(emptySubmissionHistory)
   const [playerNameInput, setPlayerNameInput] = useState<string>('')
   const [isGameMaster, setIsGameMaster] = useState(false)
+  const [reshuffleCount, setReshuffleCount] = useState(3) // Track total reshuffles per game
 
   const activeWord = roundWords[currentRound] ?? ''
   const [gameMasterId, setGameMasterId] = useState<string | null>(null)
@@ -125,6 +126,7 @@ function App() {
     setRoundWords(words)
     setCurrentRound(0)
     setHistory(emptySubmissionHistory)
+    setReshuffleCount(3) // Reset reshuffle count for new game
     setPhase('playing')
 
     // Sync to room state via WebSocket (game master only)
@@ -215,6 +217,17 @@ function App() {
   )
 
   const handleReshuffleWord = useCallback(() => {
+    // Check if reshuffle limit reached (3 per game)
+    if (reshuffleCount <= 0) {
+      return
+    }
+
+    // Decrement reshuffle count first (outside of setRoundWords to ensure it only happens once)
+    setReshuffleCount((prev) => {
+      if (prev <= 0) return prev
+      return prev - 1
+    })
+
     setRoundWords((prev) => {
       if (!prev.length) {
         return prev
@@ -247,7 +260,7 @@ function App() {
 
       return updated
     })
-  }, [currentRound, history, roomId])
+  }, [currentRound, history, roomId, reshuffleCount])
 
   const handleCreateRoom = useCallback(() => {
     const newRoomId = createRoomId()
@@ -524,6 +537,8 @@ function App() {
             onTimeout={handleRoundTimeout}
             onSkip={handleRoundSkip}
             onReshuffle={handleReshuffleWord}
+            reshuffleCount={reshuffleCount}
+            isGameMaster={isGameMaster}
           />
         </>
       )}
@@ -765,6 +780,8 @@ interface GameRoundProps {
   onTimeout: (word: string) => void
   onSkip: (word: string) => void
   onReshuffle: () => void
+  reshuffleCount: number
+  isGameMaster: boolean
 }
 
 type SubmissionStatus = 'idle' | 'validating' | 'success' | 'error'
@@ -787,13 +804,14 @@ const GameRound = ({
   onSuccess,
   onTimeout,
   onSkip,
-  onReshuffle
+  onReshuffle,
+  reshuffleCount,
+  isGameMaster
 }: GameRoundProps) => {
   const [timeLeft, setTimeLeft] = useState(() => duration)
   const [roundComplete, setRoundComplete] = useState(false)
   const [showTimesUp, setShowTimesUp] = useState(false)
   const [timesUpLeft, setTimesUpLeft] = useState(0)
-  const [reshuffleUsed, setReshuffleUsed] = useState(false)
   const [submission, setSubmission] = useState<SubmissionState>({
     song: '',
     artist: '',
@@ -823,7 +841,6 @@ const GameRound = ({
     setRoundComplete(false)
     setShowTimesUp(false)
     setTimesUpLeft(0)
-    setReshuffleUsed(false)
   }, [roundIndex, duration, word])
 
   const percentLeft = (timeLeft / duration) * 100
@@ -949,13 +966,14 @@ const GameRound = ({
   }
 
   const handleReshuffle = () => {
-    if (roundComplete || reshuffleUsed) {
+    if (roundComplete || reshuffleCount <= 0) {
       return
     }
-    setReshuffleUsed(true)
     onReshuffle()
     // Timer continues - don't reset it
   }
+  
+  const canReshuffle = !roundComplete && reshuffleCount > 0
 
   const handleSubmissionChange = (
     field: 'song' | 'artist',
@@ -1059,15 +1077,17 @@ const GameRound = ({
           </div>
         )}
 
-        {gameMaster && (
+        {gameMaster && isGameMaster && (
           <div className="gm-controls">
             <button
               type="button"
               className="ghost-button"
-              disabled={roundComplete || reshuffleUsed}
+              disabled={!canReshuffle}
               onClick={handleReshuffle}
             >
-              {reshuffleUsed ? 'Reshuffle used' : 'Reshuffle word'}
+              {reshuffleCount > 0 
+                ? `Reshuffle (${reshuffleCount} left)` 
+                : 'Reshuffle (0 left)'}
             </button>
             <button
               type="button"
